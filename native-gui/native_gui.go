@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"os"
 	"strings"
@@ -18,7 +17,9 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// NativeGUI implements a native GUI for SFTP synchronization
 type NativeGUI struct {
+	// Fyne components
 	app         fyne.App
 	window      fyne.Window
 	startBtn    *widget.Button
@@ -26,69 +27,36 @@ type NativeGUI struct {
 	configBtn   *widget.Button
 	exitBtn     *widget.Button
 	statusLabel *widget.Label
-	logText     *widget.Entry
+	logText     *widget.Label
 	progressBar *widget.ProgressBarInfinite
 
-	ctx         context.Context
-	cancel      context.CancelFunc
-	isRunning   bool
-	mutex       sync.RWMutex
-	syncProcess *NativeSyncProcess
-	cancelled   bool
-
-	logWriter   *NativeLogWriter
-	originalOut io.Writer
-}
-
-type NativeSyncProcess struct {
-	syncer     *SFTPSync
-	cancel     context.CancelFunc
-	logRestore func()
+	// Sync state
+	syncCtx    context.Context
+	syncCancel context.CancelFunc
+	isRunning  bool
 	cancelled  bool
+	mutex      sync.RWMutex
+
+	// Log entries
+	logs      []string
+	logsMutex sync.RWMutex
+
+	// UI update state
+	logDisplay string
+	logMutex   sync.RWMutex
 }
 
-type NativeLogWriter struct {
-	gui   *NativeGUI
-	mutex sync.Mutex
-}
-
-func (nlw *NativeLogWriter) Write(p []byte) (n int, err error) {
-	nlw.mutex.Lock()
-	defer nlw.mutex.Unlock()
-
-	msg := string(p)
-	msg = strings.TrimSpace(msg)
-
-	// Filter out error messages that happen after cancellation
-	if nlw.gui.cancelled {
-		if strings.Contains(msg, "connection lost") ||
-			strings.Contains(msg, "failed to read directory") ||
-			strings.Contains(msg, "Error scanning") {
-			// Suppress these error messages after cancellation
-			return len(p), nil
-		}
-	}
-
-	if msg != "" {
-		nlw.gui.AddLog(msg)
-	}
-
-	return len(p), nil
-}
-
+// NewNativeGUI creates a new native GUI instance
 func NewNativeGUI() *NativeGUI {
 	myApp := app.New()
-	myApp.SetIcon(theme.DocumentIcon())
-	myApp.Settings().SetTheme(theme.DefaultTheme())
-
-	window := myApp.NewWindow("SFTP Sync Tool")
-	window.Resize(fyne.NewSize(900, 700))
-	window.SetFixedSize(false)
+	myWindow := myApp.NewWindow("SFTP Sync Tool")
+	myWindow.Resize(fyne.NewSize(900, 700))
 
 	gui := &NativeGUI{
-		app:         myApp,
-		window:      window,
-		originalOut: os.Stdout,
+		app:        myApp,
+		window:     myWindow,
+		logs:       make([]string, 0, 50),
+		logDisplay: "SFTP Sync Tool - Ready to start\nClick 'Start Sync' to begin synchronization",
 	}
 
 	gui.setupUI()
@@ -97,11 +65,15 @@ func NewNativeGUI() *NativeGUI {
 	return gui
 }
 
+// setupUI creates the user interface
 func (g *NativeGUI) setupUI() {
-	// Title
-	title := widget.NewCard("SFTP Sync Tool", "Cross-platform file synchronization", nil)
-	title.SetTitle("SFTP Sync Tool")
-	title.SetSubTitle("Cross-platform file synchronization with real-time logging")
+	// Title and header
+	title := widget.NewLabel("SFTP Sync Tool")
+	title.TextStyle = fyne.TextStyle{Bold: true}
+	title.Alignment = fyne.TextAlignCenter
+
+	subtitle := widget.NewLabel("Cross-platform file synchronization with real-time logging")
+	subtitle.Alignment = fyne.TextAlignCenter
 
 	// Status section
 	g.statusLabel = widget.NewLabel("Ready")
@@ -111,28 +83,46 @@ func (g *NativeGUI) setupUI() {
 	g.progressBar = widget.NewProgressBarInfinite()
 	g.progressBar.Hide()
 
+	// Control buttons
+	g.startBtn = widget.NewButton("Start Sync", func() {
+		// Button action handled in event handler to avoid multiple registrations
+	})
+	g.startBtn.Importance = widget.HighImportance
+	g.startBtn.SetIcon(theme.MediaPlayIcon())
+
+	g.stopBtn = widget.NewButton("Stop", func() {
+		// Button action handled in event handler to avoid multiple registrations
+	})
+	g.stopBtn.Importance = widget.DangerImportance
+	g.stopBtn.SetIcon(theme.MediaStopIcon())
+	g.stopBtn.Disable()
+
+	g.configBtn = widget.NewButton("Config", func() {
+		// Button action handled in event handler to avoid multiple registrations
+	})
+	g.configBtn.SetIcon(theme.SettingsIcon())
+
+	g.exitBtn = widget.NewButton("Exit", func() {
+		// Button action handled in event handler to avoid multiple registrations
+	})
+	g.exitBtn.SetIcon(theme.LogoutIcon())
+
+	// Log display - use Entry for better text handling
+	g.logText = widget.NewLabel("SFTP Sync Tool - Ready to start\nClick 'Start Sync' to begin synchronization")
+	g.logText.Wrapping = fyne.TextWrapWord
+
+	// Layout components
+	headerContainer := container.NewVBox(
+		title,
+		subtitle,
+	)
+
 	statusContainer := container.NewVBox(
 		widget.NewCard("Status", "", container.NewVBox(
 			g.statusLabel,
 			g.progressBar,
 		)),
 	)
-
-	// Control buttons
-	g.startBtn = widget.NewButton("Start Sync", g.onStartClick)
-	g.startBtn.Importance = widget.HighImportance
-	g.startBtn.Icon = theme.MediaPlayIcon()
-
-	g.stopBtn = widget.NewButton("Stop", g.onStopClick)
-	g.stopBtn.Importance = widget.DangerImportance
-	g.stopBtn.Icon = theme.MediaStopIcon()
-	g.stopBtn.Disable()
-
-	g.configBtn = widget.NewButton("Config", g.onConfigClick)
-	g.configBtn.Icon = theme.SettingsIcon()
-
-	g.exitBtn = widget.NewButton("Exit", g.onExitClick)
-	g.exitBtn.Icon = theme.LogoutIcon()
 
 	buttonContainer := container.NewGridWithColumns(4,
 		g.startBtn,
@@ -141,156 +131,211 @@ func (g *NativeGUI) setupUI() {
 		g.exitBtn,
 	)
 
-	// Log display
-	g.logText = widget.NewMultiLineEntry()
-	g.logText.SetText("SFTP Sync Tool - Ready to start\nClick 'Start Sync' to begin synchronization\n")
-	g.logText.Wrapping = fyne.TextWrapWord
-	g.logText.Disable() // Make it read-only
-
 	logContainer := container.NewBorder(
 		widget.NewLabel("Logs:"),
-		nil,
-		nil,
-		nil,
+		nil, nil, nil,
 		container.NewScroll(g.logText),
 	)
-
-	// Log writer setup
-	g.logWriter = &NativeLogWriter{gui: g}
 
 	// Main layout
 	content := container.NewBorder(
 		container.NewVBox(
-			title,
+			headerContainer,
 			statusContainer,
 			buttonContainer,
 		),
-		nil,
-		nil,
-		nil,
+		nil, nil, nil,
 		logContainer,
 	)
 
 	g.window.SetContent(content)
 }
 
+// setupEventHandlers connects UI events to handlers
 func (g *NativeGUI) setupEventHandlers() {
+	g.startBtn.OnTapped = g.onStartClick
+	g.stopBtn.OnTapped = g.onStopClick
+	g.configBtn.OnTapped = g.onConfigClick
+	g.exitBtn.OnTapped = g.onExitClick
+
 	g.window.SetCloseIntercept(func() {
-		if g.isRunning {
-			dialog.ShowConfirm("Confirm Exit", "Sync is running. Are you sure you want to exit?",
-				func(confirm bool) {
-					if confirm {
-						g.forceExit()
-					}
-				}, g.window)
-		} else {
-			g.app.Quit()
-		}
+		g.onExitClick()
 	})
 }
 
+// updateUI schedules UI updates to run on the main thread
+func (g *NativeGUI) updateUI(f func()) {
+	// Use fyne.Do to safely update UI from any goroutine
+	fyne.Do(f)
+}
+
+// AddLog adds a log entry and updates the display
 func (g *NativeGUI) AddLog(msg string) {
-	// Clean up the message
 	msg = strings.TrimSpace(msg)
 	if msg == "" {
 		return
 	}
 
-	timestamp := time.Now().Format("15:04:05")
-	logEntry := fmt.Sprintf("[%s] %s\n", timestamp, msg)
-
-	// Update UI in main thread using content.Refresh()
-	go func() {
-		// Append to log text
-		currentText := g.logText.Text
-		lines := strings.Split(currentText, "\n")
-
-		// Keep only last 500 lines for performance
-		if len(lines) > 500 {
-			lines = lines[len(lines)-500:]
+	// Filter out noise after cancellation
+	if g.cancelled {
+		if strings.Contains(msg, "connection lost") ||
+			strings.Contains(msg, "failed to read directory") ||
+			strings.Contains(msg, "Error scanning") ||
+			strings.Contains(msg, "context canceled") ||
+			strings.Contains(msg, "EOF") {
+			return
 		}
-
-		newText := strings.Join(lines, "\n") + logEntry
-		g.logText.SetText(newText)
-
-		// Auto-scroll to bottom
-		g.logText.CursorRow = len(strings.Split(newText, "\n")) - 1
-
-		// Refresh the widget to update display
-		g.logText.Refresh()
-	}()
-}
-
-func (g *NativeGUI) SetStatus(status string) {
-	g.mutex.Lock()
-	defer g.mutex.Unlock()
-
-	g.statusLabel.SetText(status)
-
-	// Update status color based on state
-	switch status {
-	case "Ready":
-		g.statusLabel.TextStyle = fyne.TextStyle{Bold: true}
-	case "Running...":
-		g.statusLabel.TextStyle = fyne.TextStyle{Bold: true, Italic: true}
-	case "Completed":
-		g.statusLabel.TextStyle = fyne.TextStyle{Bold: true}
-	case "Failed", "Error":
-		g.statusLabel.TextStyle = fyne.TextStyle{Bold: true}
-	case "Cancelled":
-		g.statusLabel.TextStyle = fyne.TextStyle{Bold: true}
 	}
 
-	g.statusLabel.Refresh()
+	// Limit message length to prevent UI issues
+	if len(msg) > 200 {
+		msg = msg[:200] + "..."
+	}
+
+	// Create timestamped log entry
+	timestamp := time.Now().Format("15:04:05")
+	logEntry := fmt.Sprintf("[%s] %s", timestamp, msg)
+
+	// Update display text safely
+	g.logMutex.Lock()
+	defer g.logMutex.Unlock()
+
+	if g.logDisplay == "SFTP Sync Tool - Ready to start\nClick 'Start Sync' to begin synchronization" {
+		g.logDisplay = logEntry
+	} else {
+		g.logDisplay += "\n" + logEntry
+	}
+
+	// Keep only the last 15 lines and limit total length
+	lines := strings.Split(g.logDisplay, "\n")
+	if len(lines) > 50 {
+		lines = lines[len(lines)-15:]
+		g.logDisplay = strings.Join(lines, "\n")
+	}
+
+	// Limit total display text length to prevent UI crashes
+	if len(g.logDisplay) > 2000 {
+		lines = strings.Split(g.logDisplay, "\n")
+		if len(lines) > 5 {
+			lines = lines[len(lines)-5:]
+			g.logDisplay = strings.Join(lines, "\n")
+		}
+	}
+
+	displayText := g.logDisplay
+
+	// Queue UI update with safety check
+	g.updateUI(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("UI update panic recovered: %v", r)
+			}
+		}()
+		if g.logText != nil && displayText != "" {
+			// Additional safety check for text length
+			if len(displayText) > 1500 {
+				displayText = displayText[len(displayText)-1500:]
+			}
+			g.logText.SetText(displayText)
+		}
+	})
 }
 
+// SetStatus updates the status display
+func (g *NativeGUI) SetStatus(status string) {
+	// Limit status length to prevent UI issues
+	if len(status) > 100 {
+		status = status[:100] + "..."
+	}
+
+	g.updateUI(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Status update panic recovered: %v", r)
+			}
+		}()
+		if g.statusLabel != nil {
+			g.statusLabel.SetText(status)
+		}
+	})
+}
+
+// UpdateRunningState updates the UI elements based on running state
+func (g *NativeGUI) UpdateRunningState(running bool) {
+	g.updateUI(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("Button state update panic recovered: %v", r)
+			}
+		}()
+		if running {
+			if g.startBtn != nil {
+				g.startBtn.Disable()
+			}
+			if g.stopBtn != nil {
+				g.stopBtn.Enable()
+			}
+			if g.progressBar != nil {
+				g.progressBar.Show()
+				g.progressBar.Start()
+			}
+		} else {
+			if g.startBtn != nil {
+				g.startBtn.Enable()
+			}
+			if g.stopBtn != nil {
+				g.stopBtn.Disable()
+			}
+			if g.progressBar != nil {
+				g.progressBar.Stop()
+				g.progressBar.Hide()
+			}
+		}
+	})
+}
+
+// onStartClick handles the Start button click
 func (g *NativeGUI) onStartClick() {
 	g.mutex.Lock()
-	defer g.mutex.Unlock()
-
 	if g.isRunning {
+		g.mutex.Unlock()
 		return
 	}
 
 	g.isRunning = true
 	g.cancelled = false
-	g.ctx, g.cancel = context.WithCancel(context.Background())
+	g.syncCtx, g.syncCancel = context.WithCancel(context.Background())
+	g.mutex.Unlock()
 
-	g.startBtn.Disable()
-	g.stopBtn.Enable()
+	// Update UI
+	g.UpdateRunningState(true)
 	g.SetStatus("Starting...")
-	g.progressBar.Show()
-	g.progressBar.Start()
 
-	// Redirect log output
-	log.SetOutput(g.logWriter)
-
+	// Start sync in background
 	go g.runSync()
 }
 
+// onStopClick handles the Stop button click
 func (g *NativeGUI) onStopClick() {
 	g.mutex.Lock()
-	defer g.mutex.Unlock()
-
 	if !g.isRunning {
+		g.mutex.Unlock()
 		return
 	}
 
-	g.SetStatus("Stopping...")
 	g.cancelled = true
+	g.mutex.Unlock()
 
-	// Cancel the main context
-	if g.cancel != nil {
-		g.cancel()
-	}
+	g.SetStatus("Stopping...")
+	g.AddLog("Stop requested by user")
 
-	// Also cancel the sync process directly
-	if g.syncProcess != nil && g.syncProcess.cancel != nil {
-		g.syncProcess.cancel()
-		g.syncProcess.cancelled = true
+	// Cancel the sync context
+	if g.syncCancel != nil {
+		g.syncCancel()
 	}
 }
 
+// onConfigClick handles the Config button click
 func (g *NativeGUI) onConfigClick() {
 	configPath := "config.json"
 
@@ -316,9 +361,7 @@ func (g *NativeGUI) onConfigClick() {
 	dialog.ShowCustomConfirm("Configuration Editor", "Save", "Cancel",
 		container.NewBorder(
 			widget.NewLabel("Edit your configuration:"),
-			nil,
-			nil,
-			nil,
+			nil, nil, nil,
 			container.NewScroll(entry),
 		),
 		func(save bool) {
@@ -332,6 +375,7 @@ func (g *NativeGUI) onConfigClick() {
 		}, g.window)
 }
 
+// onExitClick handles the Exit button click
 func (g *NativeGUI) onExitClick() {
 	if g.isRunning {
 		dialog.ShowConfirm("Confirm Exit", "Sync is running. Are you sure you want to exit?",
@@ -345,48 +389,67 @@ func (g *NativeGUI) onExitClick() {
 	}
 }
 
+// forceExit forces the application to exit
 func (g *NativeGUI) forceExit() {
 	if g.isRunning {
 		g.cancelled = true
-		if g.cancel != nil {
-			g.cancel()
+		if g.syncCancel != nil {
+			g.syncCancel()
 		}
-		if g.syncProcess != nil && g.syncProcess.cancel != nil {
-			g.syncProcess.cancel()
-		}
+		// Give it a moment to cleanup
+		time.Sleep(500 * time.Millisecond)
 	}
 	g.app.Quit()
 }
 
+// SafeLogWriter is a custom log writer that captures logs safely
+type SafeLogWriter struct {
+	gui *NativeGUI
+}
+
+// Write implements io.Writer interface
+func (w *SafeLogWriter) Write(p []byte) (n int, err error) {
+	msg := string(p)
+	msg = strings.TrimSpace(msg)
+
+	if msg != "" {
+		w.gui.AddLog(msg)
+	}
+
+	return len(p), nil
+}
+
+// runSync runs the synchronization process
 func (g *NativeGUI) runSync() {
-	// Ensure cleanup happens no matter what
+	// Ensure cleanup happens
 	defer func() {
+		if r := recover(); r != nil {
+			g.AddLog(fmt.Sprintf("Sync crashed: %v", r))
+		}
+
 		g.mutex.Lock()
 		g.isRunning = false
-		g.startBtn.Enable()
-		g.stopBtn.Disable()
-		g.progressBar.Stop()
-		g.progressBar.Hide()
-
-		// Clean up sync process
-		if g.syncProcess != nil {
-			g.cleanupSyncProcess()
-		}
 		g.mutex.Unlock()
 
+		// Update UI
+		g.UpdateRunningState(false)
+
 		// Restore original log output
-		log.SetOutput(g.originalOut)
+		log.SetOutput(os.Stdout)
 	}()
 
 	g.SetStatus("Running...")
 	g.AddLog("Starting SFTP Sync...")
 
-	// Create sync process structure
-	syncCtx, syncCancel := context.WithCancel(context.Background())
-	g.syncProcess = &NativeSyncProcess{
-		cancel:    syncCancel,
-		cancelled: false,
-	}
+	// Set up log redirection
+	originalOutput := log.Writer()
+	logWriter := &SafeLogWriter{gui: g}
+	log.SetOutput(logWriter)
+
+	// Ensure we restore original output
+	defer func() {
+		log.SetOutput(originalOutput)
+	}()
 
 	// Load configuration
 	configPath := "config.json"
@@ -419,82 +482,31 @@ func (g *NativeGUI) runSync() {
 
 	// Create syncer
 	syncer := NewSFTPSync(sourceConfig, destConfig, syncConfig)
-	g.syncProcess.syncer = syncer
 
-	// Run sync with proper cancellation support
-	done := make(chan error, 1)
-	go func() {
-		// This goroutine will handle the sync operation
-		defer func() {
-			if r := recover(); r != nil {
-				done <- fmt.Errorf("sync panic: %v", r)
-			}
-		}()
+	// Run sync with context cancellation support
+	err = syncer.SyncWithContext(g.syncCtx)
 
-		// Check for cancellation before starting
-		select {
-		case <-syncCtx.Done():
-			done <- context.Canceled
-			return
-		default:
-		}
-
-		// Run the sync with context cancellation support
-		err := syncer.SyncWithContext(syncCtx)
-		done <- err
-	}()
-
-	// Wait for completion or cancellation
-	select {
-	case err := <-done:
-		if err != nil {
-			if err == context.Canceled {
-				g.AddLog("Sync cancelled by user")
-				g.SetStatus("Cancelled")
-			} else {
-				g.AddLog(fmt.Sprintf("Sync failed: %v", err))
-				g.SetStatus("Failed")
-			}
+	// Update final status
+	if err != nil {
+		if err == context.Canceled {
+			g.AddLog("Sync cancelled by user")
+			g.SetStatus("Cancelled")
 		} else {
-			g.AddLog("Sync completed successfully!")
-			g.SetStatus("Completed")
+			g.AddLog(fmt.Sprintf("Sync failed: %v", err))
+			g.SetStatus("Failed")
 		}
-	case <-g.ctx.Done():
-		g.AddLog("Sync cancelled by user")
-		g.SetStatus("Cancelled")
-		// Cancel the sync context
-		syncCancel()
-
-		// Wait a bit for graceful shutdown
-		select {
-		case <-done:
-			// Sync completed/failed
-		case <-time.After(5 * time.Second):
-			g.AddLog("Sync force-stopped after timeout")
-		}
-	case <-syncCtx.Done():
-		g.AddLog("Sync cancelled")
-		g.SetStatus("Cancelled")
+	} else {
+		g.AddLog("Sync completed successfully!")
+		g.SetStatus("Completed")
 	}
 }
 
-func (g *NativeGUI) cleanupSyncProcess() {
-	if g.syncProcess == nil {
-		return
-	}
-
-	// Cancel the sync context
-	if g.syncProcess.cancel != nil {
-		g.syncProcess.cancel()
-	}
-
-	g.syncProcess = nil
-}
-
+// Run starts the GUI application
 func (g *NativeGUI) Run() {
 	g.window.ShowAndRun()
 }
 
+// mainNativeGUI is the entry point for the native GUI
 func mainNativeGUI() {
 	gui := NewNativeGUI()
 	gui.Run()

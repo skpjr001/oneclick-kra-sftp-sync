@@ -196,7 +196,9 @@ func (s *SFTPSync) connectSFTP(config SFTPConfig) (*ssh.Client, *sftp.Client, er
 			for {
 				select {
 				case <-ticker.C:
-					sshClient.SendRequest("keepalive@openssh.com", true, nil)
+					if sshClient != nil {
+						sshClient.SendRequest("keepalive@openssh.com", true, nil)
+					}
 				}
 			}
 		}()
