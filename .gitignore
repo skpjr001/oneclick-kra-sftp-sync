@@ -1,0 +1,9 @@
+**/build/*
+**/build/**/*
+**/packages/*
+
+**/packages/*
+**/packages/**/*
+
+**/package.json
+**/package-lock.json
