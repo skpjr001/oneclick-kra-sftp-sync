@@ -352,27 +352,74 @@ func (g *NativeGUI) onConfigClick() {
 		return
 	}
 
-	// Create config editor
+	// Create config editor with better formatting
 	entry := widget.NewMultiLineEntry()
 	entry.SetText(string(content))
 	entry.Wrapping = fyne.TextWrapWord
+	entry.TextStyle = fyne.TextStyle{Monospace: true} // Use monospace font for JSON
 
-	// Create dialog
-	dialog.ShowCustomConfirm("Configuration Editor", "Save", "Cancel",
-		container.NewBorder(
-			widget.NewLabel("Edit your configuration:"),
-			nil, nil, nil,
-			container.NewScroll(entry),
+	// Create header with instructions
+	headerLabel := widget.NewLabel("Edit your SFTP sync configuration below:")
+	headerLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	// Create info text
+	infoLabel := widget.NewLabel("This is a JSON configuration file. Please maintain valid JSON format.")
+	infoLabel.Wrapping = fyne.TextWrapWord
+
+	// Create buttons with better spacing
+	var configDialog *dialog.CustomDialog
+	saveBtn := widget.NewButton("Save Changes", func() {
+		if err := os.WriteFile(configPath, []byte(entry.Text), 0644); err != nil {
+			dialog.ShowError(fmt.Errorf("Failed to save config: %v", err), g.window)
+		} else {
+			dialog.ShowInformation("Success", "Configuration saved successfully", g.window)
+			configDialog.Hide()
+		}
+	})
+	saveBtn.Importance = widget.HighImportance
+	saveBtn.SetIcon(theme.DocumentSaveIcon())
+
+	cancelBtn := widget.NewButton("Cancel", func() {
+		configDialog.Hide()
+	})
+	cancelBtn.SetIcon(theme.CancelIcon())
+
+	reloadBtn := widget.NewButton("Reload", func() {
+		// Reload the config file
+		if newContent, err := os.ReadFile(configPath); err == nil {
+			entry.SetText(string(newContent))
+		}
+	})
+	reloadBtn.SetIcon(theme.ViewRefreshIcon())
+
+	buttonContainer := container.NewBorder(
+		nil, nil, nil, nil,
+		container.NewHBox(
+			saveBtn,
+			reloadBtn,
+			cancelBtn,
 		),
-		func(save bool) {
-			if save {
-				if err := os.WriteFile(configPath, []byte(entry.Text), 0644); err != nil {
-					dialog.ShowError(fmt.Errorf("Failed to save config: %v", err), g.window)
-				} else {
-					dialog.ShowInformation("Success", "Configuration saved successfully", g.window)
-				}
-			}
-		}, g.window)
+	)
+
+	// Create the main content with better layout
+	headerContainer := container.NewVBox(
+		headerLabel,
+		infoLabel,
+		widget.NewSeparator(),
+	)
+
+	// Create larger custom dialog without dismiss button
+	configDialog = dialog.NewCustomWithoutButtons("Configuration Editor",
+		container.NewBorder(
+			headerContainer,
+			buttonContainer,
+			nil, nil,
+			container.NewScroll(entry),
+		), g.window)
+
+	// Set dialog size to be much larger
+	configDialog.Resize(fyne.NewSize(900, 700))
+	configDialog.Show()
 }
 
 // onExitClick handles the Exit button click
