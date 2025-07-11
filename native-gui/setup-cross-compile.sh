@@ -166,6 +166,8 @@ install_linux_gui_deps() {
     print_status "SUCCESS" "Linux GUI dependencies installed"
 }
 
+
+
 # Function to install MinGW for Windows cross-compilation
 install_mingw() {
     local os_id=$1
@@ -218,9 +220,55 @@ install_mingw() {
     fi
 
     if command -v i686-w64-mingw32-gcc &> /dev/null; then
-        print_status "SUCCESS" "MinGW 32-bit compiler installed"
+        print_status "SUCCESS" "MinGW dependencies installed"
     else
         print_status "WARNING" "MinGW 32-bit compiler not found"
+    fi
+}
+
+# Function to install ARM64 cross-compiler
+install_arm64_cross_compiler() {
+    local os_id=$1
+
+    print_status "INFO" "Installing ARM64 cross-compiler..."
+
+    case $os_id in
+        "ubuntu"|"debian")
+            print_status "INFO" "Installing ARM64 cross-compiler for Ubuntu/Debian..."
+            sudo apt-get install -y \
+                gcc-aarch64-linux-gnu \
+                g++-aarch64-linux-gnu \
+                libc6-dev-arm64-cross
+            ;;
+        "fedora")
+            print_status "INFO" "Installing ARM64 cross-compiler for Fedora..."
+            sudo dnf install -y \
+                gcc-aarch64-linux-gnu \
+                binutils-aarch64-linux-gnu
+            ;;
+        "centos"|"rhel")
+            print_status "INFO" "Installing ARM64 cross-compiler for CentOS/RHEL..."
+            sudo yum install -y \
+                gcc-aarch64-linux-gnu \
+                binutils-aarch64-linux-gnu
+            ;;
+        "arch"|"manjaro")
+            print_status "INFO" "Installing ARM64 cross-compiler for Arch Linux..."
+            sudo pacman -S --needed \
+                aarch64-linux-gnu-gcc
+            ;;
+        *)
+            print_status "WARNING" "Unknown Linux distribution: $os_id"
+            print_status "INFO" "Please install ARM64 cross-compiler manually"
+            return 1
+            ;;
+    esac
+
+    # Verify ARM64 cross-compiler installation
+    if command -v aarch64-linux-gnu-gcc &> /dev/null; then
+        print_status "SUCCESS" "ARM64 cross-compiler installed"
+    else
+        print_status "WARNING" "ARM64 cross-compiler not found after installation"
     fi
 }
 
@@ -267,6 +315,13 @@ verify_installation() {
         print_status "SUCCESS" "MinGW 32-bit found"
     else
         print_status "WARNING" "MinGW 32-bit not found (Windows 32-bit builds will be skipped)"
+    fi
+
+    # Check ARM64 cross-compiler
+    if command -v aarch64-linux-gnu-gcc &> /dev/null; then
+        print_status "SUCCESS" "ARM64 cross-compiler found"
+    else
+        print_status "WARNING" "ARM64 cross-compiler not found (ARM64 builds will use fallback)"
     fi
 
     if [ $errors -eq 0 ]; then
@@ -333,6 +388,16 @@ EOF
         fi
     fi
 
+    # Test ARM64 builds (if cross-compiler available)
+    if command -v aarch64-linux-gnu-gcc &> /dev/null; then
+        print_status "INFO" "Testing ARM64 cross-compilation..."
+        if CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -o test-linux-arm64; then
+            print_status "SUCCESS" "ARM64 build works"
+        else
+            print_status "WARNING" "ARM64 build failed, fallback to no-CGO will be used"
+        fi
+    fi
+
     # Test macOS builds (if on macOS)
     if [ "$(uname)" = "Darwin" ]; then
         print_status "INFO" "Testing macOS cross-compilation..."
@@ -359,6 +424,7 @@ show_summary() {
     echo "  • GCC and build tools"
     echo "  • Linux GUI development libraries"
     echo "  • MinGW cross-compiler (if available)"
+    echo "  • ARM64 cross-compiler (if available)"
     echo "  • pkg-config and development tools"
     echo ""
     echo "🚀 Next Steps:"
@@ -387,12 +453,14 @@ show_usage() {
     echo "  -h, --help          Show this help message"
     echo "  --no-gui-deps       Skip Linux GUI dependencies"
     echo "  --no-mingw          Skip MinGW installation"
+    echo "  --no-arm64          Skip ARM64 cross-compiler installation"
     echo "  --test-only         Only run build tests"
     echo "  --verify-only       Only verify existing installation"
     echo ""
     echo "This script installs dependencies required for cross-platform builds:"
     echo "  • Linux GUI development libraries"
     echo "  • MinGW cross-compiler for Windows builds"
+    echo "  • ARM64 cross-compiler for Linux ARM64 builds"
     echo "  • Build tools and verification"
 }
 
@@ -400,6 +468,7 @@ show_usage() {
 main() {
     local install_gui_deps=true
     local install_mingw=true
+    local install_arm64=true
     local test_only=false
     local verify_only=false
 
@@ -416,6 +485,10 @@ main() {
                 ;;
             --no-mingw)
                 install_mingw=false
+                shift
+                ;;
+            --no-arm64)
+                install_arm64=false
                 shift
                 ;;
             --test-only)
@@ -480,6 +553,11 @@ main() {
     # Install MinGW for Windows cross-compilation
     if [ "$install_mingw" = true ]; then
         install_mingw "$os_id"
+    fi
+
+    # Install ARM64 cross-compiler
+    if [ "$install_arm64" = true ]; then
+        install_arm64_cross_compiler "$os_id"
     fi
 
     # Verify installation

@@ -1,4 +1,5 @@
 **/build/**/*
+**/build-simple/**/*
 **/build-native/**/*
 **/packages/**/*
 **/temp-package/**/*

@@ -97,6 +97,16 @@ check_mingw_availability() {
     fi
 }
 
+# Function to check if ARM64 cross-compilation is available
+check_arm64_availability() {
+    # Check if we have ARM64 cross-compiler
+    if command -v aarch64-linux-gnu-gcc &> /dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
 # Function to build executables with better error handling
 build_executables() {
     print_status "INFO" "Building executables for all platforms..."
@@ -133,11 +143,27 @@ build_executables() {
         print_status "WARNING" "Linux amd64 build failed"
     fi
 
-    # Linux arm64
-    if GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-linux-arm64"; then
-        print_status "SUCCESS" "Linux arm64 build completed"
+    # Linux arm64 (with special handling)
+    print_status "INFO" "Attempting Linux ARM64 build..."
+    if check_arm64_availability; then
+        print_status "INFO" "ARM64 cross-compiler found, building with CGO..."
+        if CC=aarch64-linux-gnu-gcc GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-linux-arm64"; then
+            print_status "SUCCESS" "Linux arm64 build completed"
+        else
+            print_status "WARNING" "Linux arm64 build with CGO failed, trying without CGO..."
+            if GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o "$BUILD_DIR/sftp-sync-native-linux-arm64"; then
+                print_status "SUCCESS" "Linux arm64 build completed (without CGO)"
+            else
+                print_status "WARNING" "Linux arm64 build failed completely"
+            fi
+        fi
     else
-        print_status "WARNING" "Linux arm64 build failed"
+        print_status "INFO" "ARM64 cross-compiler not found, building without CGO..."
+        if GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o "$BUILD_DIR/sftp-sync-native-linux-arm64"; then
+            print_status "SUCCESS" "Linux arm64 build completed (without CGO)"
+        else
+            print_status "WARNING" "Linux arm64 build failed - this may be due to native GUI requirements"
+        fi
     fi
 
     # Build for Windows platforms (only if MinGW is available)
@@ -145,17 +171,23 @@ build_executables() {
         print_status "INFO" "Building for Windows platforms..."
 
         # Windows amd64
-        if CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-windows-amd64.exe"; then
+        print_status "INFO" "Building Windows amd64..."
+        if CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-windows-amd64.exe" 2>/dev/null; then
             print_status "SUCCESS" "Windows amd64 build completed"
         else
-            print_status "WARNING" "Windows amd64 build failed"
+            print_status "WARNING" "Windows amd64 build failed - check MinGW installation"
         fi
 
         # Windows 386
-        if CC=i686-w64-mingw32-gcc GOOS=windows GOARCH=386 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-windows-386.exe"; then
-            print_status "SUCCESS" "Windows 386 build completed"
+        print_status "INFO" "Building Windows 386..."
+        if command -v i686-w64-mingw32-gcc &> /dev/null; then
+            if CC=i686-w64-mingw32-gcc GOOS=windows GOARCH=386 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-windows-386.exe" 2>/dev/null; then
+                print_status "SUCCESS" "Windows 386 build completed"
+            else
+                print_status "WARNING" "Windows 386 build failed"
+            fi
         else
-            print_status "WARNING" "Windows 386 build failed"
+            print_status "WARNING" "Windows 386 build skipped - i686-w64-mingw32-gcc not found"
         fi
     fi
 
@@ -164,6 +196,7 @@ build_executables() {
         print_status "INFO" "Building for macOS platforms..."
 
         # macOS amd64
+        print_status "INFO" "Building macOS amd64..."
         if GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-darwin-amd64"; then
             print_status "SUCCESS" "macOS amd64 build completed"
         else
@@ -171,6 +204,7 @@ build_executables() {
         fi
 
         # macOS arm64
+        print_status "INFO" "Building macOS arm64..."
         if GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-darwin-arm64"; then
             print_status "SUCCESS" "macOS arm64 build completed"
         else
@@ -675,6 +709,15 @@ main() {
         print_status "INFO" "Or install manually:"
         print_status "INFO" "  Ubuntu/Debian: sudo apt-get install gcc-mingw-w64"
         print_status "INFO" "  Fedora: sudo dnf install mingw64-gcc"
+        echo ""
+    fi
+
+    # Check ARM64 cross-compilation availability
+    if ! check_arm64_availability; then
+        print_status "WARNING" "ARM64 cross-compiler not found - ARM64 builds may use fallback"
+        print_status "INFO" "To enable ARM64 builds with CGO, install:"
+        print_status "INFO" "  Ubuntu/Debian: sudo apt-get install gcc-aarch64-linux-gnu"
+        print_status "INFO" "  Fedora: sudo dnf install gcc-aarch64-linux-gnu"
         echo ""
     fi
 
