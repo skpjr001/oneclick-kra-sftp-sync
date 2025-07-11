@@ -59,6 +59,17 @@ show_usage() {
     echo "  $0 -v 2.0.0         Create packages with version 2.0.0"
     echo "  $0 -c               Clean and create packages"
     echo "  $0 --build-only     Only build executables"
+    echo ""
+    echo "Prerequisites:"
+    echo "  • Go 1.18+ with CGO enabled"
+    echo "  • Linux GUI libraries (for native builds)"
+    echo "  • MinGW-w64 (for Windows cross-compilation)"
+    echo ""
+    echo "Setup:"
+    echo "  Run './setup-cross-compile.sh' to install dependencies"
+    echo "  Or manually install:"
+    echo "    Ubuntu/Debian: sudo apt-get install gcc-mingw-w64 libgl1-mesa-dev"
+    echo "    Fedora: sudo dnf install mingw64-gcc mesa-libGL-devel"
 }
 
 # Function to clean directories
@@ -75,31 +86,112 @@ create_directories() {
     print_status "SUCCESS" "Directory structure created"
 }
 
-# Function to build executables
+# Function to check if MinGW is available for Windows builds
+check_mingw_availability() {
+    if command -v x86_64-w64-mingw32-gcc &> /dev/null; then
+        return 0
+    elif command -v i686-w64-mingw32-gcc &> /dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Function to build executables with better error handling
 build_executables() {
     print_status "INFO" "Building executables for all platforms..."
 
-    # Use the existing build script
-    if [ -f "build-native-gui.sh" ]; then
-        print_status "INFO" "Using existing build script..."
-        if ./build-native-gui.sh; then
-            print_status "SUCCESS" "Build completed successfully"
-        else
-            print_status "ERROR" "Build failed"
-            exit 1
-        fi
+    # Check if we can build for Windows
+    local can_build_windows=false
+    if check_mingw_availability; then
+        can_build_windows=true
+        print_status "INFO" "MinGW detected - Windows builds will be included"
     else
-        print_status "ERROR" "build-native-gui.sh not found"
+        print_status "WARNING" "MinGW not found - Windows builds will be skipped"
+        print_status "INFO" "To build for Windows, install MinGW-w64:"
+        print_status "INFO" "  Ubuntu/Debian: sudo apt-get install gcc-mingw-w64"
+        print_status "INFO" "  Fedora: sudo dnf install mingw64-gcc"
+    fi
+
+    # Build for current platform first
+    print_status "INFO" "Building for current platform..."
+    export CGO_ENABLED=1
+    if go build -o "$BUILD_DIR/sftp-sync-native-current"; then
+        print_status "SUCCESS" "Current platform build completed"
+    else
+        print_status "ERROR" "Current platform build failed"
         exit 1
     fi
 
-    # Verify executables were created
+    # Build for Linux platforms
+    print_status "INFO" "Building for Linux platforms..."
+
+    # Linux amd64
+    if GOOS=linux GOARCH=amd64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-linux-amd64"; then
+        print_status "SUCCESS" "Linux amd64 build completed"
+    else
+        print_status "WARNING" "Linux amd64 build failed"
+    fi
+
+    # Linux arm64
+    if GOOS=linux GOARCH=arm64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-linux-arm64"; then
+        print_status "SUCCESS" "Linux arm64 build completed"
+    else
+        print_status "WARNING" "Linux arm64 build failed"
+    fi
+
+    # Build for Windows platforms (only if MinGW is available)
+    if [ "$can_build_windows" = true ]; then
+        print_status "INFO" "Building for Windows platforms..."
+
+        # Windows amd64
+        if CC=x86_64-w64-mingw32-gcc GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-windows-amd64.exe"; then
+            print_status "SUCCESS" "Windows amd64 build completed"
+        else
+            print_status "WARNING" "Windows amd64 build failed"
+        fi
+
+        # Windows 386
+        if CC=i686-w64-mingw32-gcc GOOS=windows GOARCH=386 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-windows-386.exe"; then
+            print_status "SUCCESS" "Windows 386 build completed"
+        else
+            print_status "WARNING" "Windows 386 build failed"
+        fi
+    fi
+
+    # Build for macOS platforms (only if on macOS)
+    if [ "$(uname)" = "Darwin" ]; then
+        print_status "INFO" "Building for macOS platforms..."
+
+        # macOS amd64
+        if GOOS=darwin GOARCH=amd64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-darwin-amd64"; then
+            print_status "SUCCESS" "macOS amd64 build completed"
+        else
+            print_status "WARNING" "macOS amd64 build failed"
+        fi
+
+        # macOS arm64
+        if GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go build -o "$BUILD_DIR/sftp-sync-native-darwin-arm64"; then
+            print_status "SUCCESS" "macOS arm64 build completed"
+        else
+            print_status "WARNING" "macOS arm64 build failed"
+        fi
+    else
+        print_status "INFO" "Skipping macOS builds (not running on macOS)"
+    fi
+
+    # Reset environment
+    unset GOOS GOARCH CGO_ENABLED CC
+
+    # Verify at least one executable was created
     if [ ! -d "$BUILD_DIR" ] || [ -z "$(ls -A $BUILD_DIR)" ]; then
         print_status "ERROR" "No executables found in $BUILD_DIR"
         exit 1
     fi
 
-    print_status "SUCCESS" "All executables built successfully"
+    # Count successful builds
+    local build_count=$(ls -1 "$BUILD_DIR" | wc -l)
+    print_status "SUCCESS" "Build completed: $build_count executable(s) created"
 }
 
 # Function to get file list for packaging
@@ -350,19 +442,36 @@ create_all_packages() {
         platforms+=("current:sftp-sync-native-current.exe:zip")
     fi
 
-    local created_count=0
-
+    # Filter out unavailable platforms
+    local available_platforms=()
     for platform_config in "${platforms[@]}"; do
         IFS=':' read -r platform executable archive_format <<< "$platform_config"
-
         if [ -f "$BUILD_DIR/$executable" ]; then
-            if create_package "$platform" "$executable" "$archive_format" "$include_docs" "$minimal"; then
-                ((created_count++))
-            fi
-        else
-            print_status "WARNING" "Executable not found: $BUILD_DIR/$executable"
+            available_platforms+=("$platform_config")
         fi
     done
+
+    if [ ${#available_platforms[@]} -eq 0 ]; then
+        print_status "ERROR" "No executables found for packaging"
+        return 1
+    fi
+
+    print_status "INFO" "Found ${#available_platforms[@]} platforms to package"
+
+    local created_count=0
+
+    for platform_config in "${available_platforms[@]}"; do
+        IFS=':' read -r platform executable archive_format <<< "$platform_config"
+
+        if create_package "$platform" "$executable" "$archive_format" "$include_docs" "$minimal"; then
+            ((created_count++))
+        fi
+    done
+
+    if [ $created_count -eq 0 ]; then
+        print_status "ERROR" "No packages were created successfully"
+        return 1
+    fi
 
     print_status "SUCCESS" "Created $created_count packages"
 }
@@ -552,6 +661,23 @@ main() {
 
     print_status "INFO" "Starting package creation for SFTP Sync Native GUI v$VERSION"
 
+    # Check prerequisites
+    if ! command -v go &> /dev/null; then
+        print_status "ERROR" "Go is not installed or not in PATH"
+        print_status "INFO" "Install Go from https://golang.org/dl/"
+        exit 1
+    fi
+
+    # Check if MinGW is available for Windows builds
+    if ! check_mingw_availability; then
+        print_status "WARNING" "MinGW not found - Windows builds will be skipped"
+        print_status "INFO" "To enable Windows builds, run: ./setup-cross-compile.sh"
+        print_status "INFO" "Or install manually:"
+        print_status "INFO" "  Ubuntu/Debian: sudo apt-get install gcc-mingw-w64"
+        print_status "INFO" "  Fedora: sudo dnf install mingw64-gcc"
+        echo ""
+    fi
+
     # Clean if requested
     if [ "$clean" = true ]; then
         clean_directories
@@ -563,6 +689,13 @@ main() {
     # Build executables (unless package-only)
     if [ "$package_only" = false ]; then
         build_executables
+    else
+        # Verify executables exist if package-only
+        if [ ! -d "$BUILD_DIR" ] || [ -z "$(ls -A $BUILD_DIR)" ]; then
+            print_status "ERROR" "No executables found in $BUILD_DIR for packaging"
+            print_status "INFO" "Run without --package-only to build first, or run build separately"
+            exit 1
+        fi
     fi
 
     # Exit if build-only
