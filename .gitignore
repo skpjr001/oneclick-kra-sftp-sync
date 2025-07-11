@@ -1,5 +1,7 @@
 **/build/**/*
+**/build-native/**/*
 **/packages/**/*
+**/temp-package/**/*
 
 # Binaries for programs and plugins
 *.exe
